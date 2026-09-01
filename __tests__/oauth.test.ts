@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   createOAuthState,
+  createMetisOAuthState,
   decryptToken,
   encryptToken,
   verifyOAuthState,
@@ -28,6 +29,15 @@ describe("OAuth state and token encryption", () => {
 
   it("rejects tampered OAuth state", () => {
     const state = createOAuthState("workspace_123");
+    expect(verifyOAuthState(`${state}tampered`)).toBeNull();
+  });
+
+  it("marks only signed bridge-issued state as a Metis return", () => {
+    const state = createMetisOAuthState("workspace_123");
+    expect(verifyOAuthState(state)).toMatchObject({
+      workspaceId: "workspace_123",
+      source: "metis",
+    });
     expect(verifyOAuthState(`${state}tampered`)).toBeNull();
   });
 });

@@ -16,29 +16,38 @@ export async function GET(request: NextRequest) {
   const error = request.nextUrl.searchParams.get("error");
   const state = verifyOAuthState(request.nextUrl.searchParams.get("state"));
   const baseUrl = getBaseUrl();
+  const returnBase = state?.source === "metis"
+    ? "https://www.metisintelligence.com.br/app"
+    : `${baseUrl}/settings`;
+  const redirectResult = (result: string, reason?: string) =>
+    NextResponse.redirect(
+      `${returnBase}?instagram=${result}${reason && state?.source !== "metis" ? `&reason=${encodeURIComponent(reason.slice(0, 200))}` : ""}${
+        state?.source === "metis" ? "#instagram" : ""
+      }`
+    );
 
   if (error) {
-    return NextResponse.redirect(`${baseUrl}/settings?instagram=denied`);
+    return redirectResult("denied");
   }
 
   if (!code || !state) {
-    return NextResponse.redirect(`${baseUrl}/settings?instagram=invalid`);
+    return redirectResult("invalid");
   }
 
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.redirect(`${baseUrl}/login`);
-  }
-
-  const membership = await prisma.workspaceMember.findFirst({
-    where: {
-      workspaceId: state.workspaceId,
-      userId: session.user.id,
-    },
-  });
-
-  if (!membership || !canManageWorkspace(membership.role)) {
-    return NextResponse.redirect(`${baseUrl}/settings?instagram=forbidden`);
+  // A Métis state is issued only by the bearer-protected server-to-server
+  // bridge after Métis has authenticated an ADMIN_CEO. Regular OpenReply OAuth
+  // still requires its own session and workspace membership.
+  if (state.source !== "metis") {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.redirect(`${baseUrl}/login`);
+    }
+    const membership = await prisma.workspaceMember.findFirst({
+      where: { workspaceId: state.workspaceId, userId: session.user.id },
+    });
+    if (!membership || !canManageWorkspace(membership.role)) {
+      return redirectResult("forbidden");
+    }
   }
 
   try {
@@ -61,9 +70,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!connection.allowed) {
-      return NextResponse.redirect(
-        `${baseUrl}/settings?instagram=already_connected`
-      );
+      return redirectResult("already_connected");
     }
 
     const encryptedToken = encryptToken(longLivedToken);
@@ -104,7 +111,9 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    return NextResponse.redirect(`${baseUrl}/dashboard?connected=true`);
+    return state.source === "metis"
+      ? redirectResult("connected")
+      : NextResponse.redirect(`${baseUrl}/dashboard?connected=true`);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     console.error("[Instagram Callback] Error:", err);
@@ -123,10 +132,6 @@ export async function GET(request: NextRequest) {
       })
       .catch(() => {});
 
-    return NextResponse.redirect(
-      `${baseUrl}/settings?instagram=failed&reason=${encodeURIComponent(
-        message.slice(0, 200)
-      )}`
-    );
+    return redirectResult("failed", message);
   }
 }
