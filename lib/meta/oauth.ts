@@ -22,6 +22,7 @@ const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 interface OAuthStatePayload {
   workspaceId: string;
   ts: number;
+  source?: "metis";
 }
 
 function base64UrlEncode(value: string): string {
@@ -41,6 +42,17 @@ function signState(payload: string): string {
 export function createOAuthState(workspaceId: string): string {
   const payload = base64UrlEncode(
     JSON.stringify({ workspaceId, ts: Date.now() } satisfies OAuthStatePayload)
+  );
+  return `${payload}.${signState(payload)}`;
+}
+
+export function createMetisOAuthState(workspaceId: string): string {
+  const payload = base64UrlEncode(
+    JSON.stringify({
+      workspaceId,
+      ts: Date.now(),
+      source: "metis",
+    } satisfies OAuthStatePayload)
   );
   return `${payload}.${signState(payload)}`;
 }
