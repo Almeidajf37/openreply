@@ -63,7 +63,15 @@ function errMessage(error: unknown): string {
 /** One reconciliation pass across every active campaign. */
 export async function reconcileComments(): Promise<void> {
   const automations = await prisma.automation.findMany({
-    where: { isActive: true },
+    where: {
+      isActive: true,
+      instagramAccount: {
+        is: {
+          connectionStatus: "CONNECTED",
+          accessToken: { not: null },
+        },
+      },
+    },
     select: {
       id: true,
       name: true,
@@ -117,7 +125,7 @@ async function sweepCampaign(
       id: string;
       instagramId: string;
       username: string;
-      accessToken: string;
+      accessToken: string | null;
     };
   },
   sinceMs: number,
@@ -136,6 +144,10 @@ async function sweepCampaign(
   };
 
   // Decrypt the account token once per sweep.
+  if (!account.accessToken) {
+    stat.errors.push("Instagram account is disconnected");
+    return stat;
+  }
   let accessToken = tokenCache.get(account.id);
   if (accessToken === undefined) {
     try {

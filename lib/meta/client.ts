@@ -35,8 +35,8 @@ export class RateLimitError extends MetaApiError {
 }
 
 export class PermissionError extends MetaApiError {
-  constructor(message: string, fbTraceId?: string) {
-    super(100, undefined, fbTraceId, message);
+  constructor(message: string, fbTraceId?: string, code = 100) {
+    super(code, undefined, fbTraceId, message);
     this.name = "PermissionError";
   }
 }
@@ -135,7 +135,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
       case 10:
       case 100:
       case 200:
-        throw new PermissionError(message, traceId);
+        throw new PermissionError(message, traceId, code);
       default:
         throw new MetaApiError(code, subcode, traceId, message);
     }
@@ -631,13 +631,19 @@ export async function getMediaInsights(
 
   const response = await fetch(url.toString());
   const data = await handleResponse<{
-    data: Array<{ name: string; values: Array<{ value: number }> }>;
+    data: Array<{
+      name: string;
+      values?: Array<{ value?: unknown }>;
+      total_value?: { value?: unknown };
+    }>;
   }>(response);
 
   const result: InstagramMediaInsights = {};
   for (const entry of data.data) {
-    result[entry.name as keyof InstagramMediaInsights] =
-      entry.values?.[0]?.value ?? 0;
+    const value = entry.values?.[0]?.value ?? entry.total_value?.value;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      result[entry.name as keyof InstagramMediaInsights] = value;
+    }
   }
   return result;
 }
@@ -714,7 +720,8 @@ export async function getFollowerCountSeries(
 export async function getLongLivedToken(
   shortLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
-  const url = new URL(`${instagramGraphBase()}/access_token`);
+  // Instagram token exchange and refresh use unversioned OAuth endpoints.
+  const url = new URL("https://graph.instagram.com/access_token");
   url.searchParams.set("grant_type", "ig_exchange_token");
   url.searchParams.set("client_secret", requireEnv("INSTAGRAM_APP_SECRET"));
   url.searchParams.set("access_token", shortLivedToken);
@@ -731,7 +738,7 @@ export async function getLongLivedToken(
 export async function refreshLongLivedToken(
   longLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
-  const url = new URL(`${instagramGraphBase()}/refresh_access_token`);
+  const url = new URL("https://graph.instagram.com/refresh_access_token");
   url.searchParams.set("grant_type", "ig_refresh_token");
   url.searchParams.set("access_token", longLivedToken);
 

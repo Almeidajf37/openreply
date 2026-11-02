@@ -6,6 +6,7 @@ const { mockPrisma } = vi.hoisted(() => ({
       count: vi.fn(),
       findUnique: vi.fn(),
       findFirst: vi.fn(),
+      updateMany: vi.fn(),
     },
   },
 }));
@@ -17,6 +18,7 @@ vi.mock("@/lib/db/client", () => ({
 import {
   canConnectInstagramAccount,
   getWorkspaceInstagramAccount,
+  softDisconnectInstagramAccount,
 } from "../lib/instagram-accounts";
 import {
   buildInvitationUrl,
@@ -73,13 +75,45 @@ describe("agency workspace helpers", () => {
 
     await getWorkspaceInstagramAccount("workspace_123", "account_1");
     expect(mockPrisma.instagramAccount.findFirst).toHaveBeenCalledWith({
-      where: { id: "account_1", workspaceId: "workspace_123" },
+      where: {
+        id: "account_1",
+        workspaceId: "workspace_123",
+        connectionStatus: "CONNECTED",
+        accessToken: { not: null },
+      },
     });
 
     await getWorkspaceInstagramAccount("workspace_123", "all");
     expect(mockPrisma.instagramAccount.findFirst).toHaveBeenLastCalledWith({
-      where: { workspaceId: "workspace_123" },
+      where: {
+        workspaceId: "workspace_123",
+        connectionStatus: "CONNECTED",
+        accessToken: { not: null },
+      },
       orderBy: { connectedAt: "desc" },
+    });
+  });
+
+  it("soft-disconnects only the requested account and preserves its record", async () => {
+    mockPrisma.instagramAccount.updateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      softDisconnectInstagramAccount("workspace_123", "account_1")
+    ).resolves.toEqual({ count: 1 });
+
+    expect(mockPrisma.instagramAccount.updateMany).toHaveBeenCalledWith({
+      where: {
+        workspaceId: "workspace_123",
+        id: "account_1",
+      },
+      data: expect.objectContaining({
+        accessToken: null,
+        tokenExpiresAt: null,
+        webhookSubscribed: false,
+        capabilities: [],
+        connectionStatus: "DISCONNECTED",
+        disconnectedAt: expect.any(Date),
+      }),
     });
   });
 
