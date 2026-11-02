@@ -2,12 +2,17 @@ import "server-only";
 
 import { DmStatus } from "@/app/generated/prisma/client";
 import { prisma } from "@/lib/db/client";
-import { getWorkspaceInstagramAccount } from "@/lib/instagram-accounts";
+import {
+  getWorkspaceInstagramAccount,
+  softDisconnectInstagramAccount,
+} from "@/lib/instagram-accounts";
 import {
   getAllUserMedia,
   getConversationMessages,
   getConversations,
+  getMediaInsights,
   MetaApiError,
+  PermissionError,
   sendDirectMessage,
 } from "@/lib/meta/client";
 import {
@@ -30,8 +35,50 @@ import type { MetisControlResult } from "@/lib/integrations/metis-control";
 
 async function ensureAccount(workspaceId: string, accountId: string) {
   return prisma.instagramAccount.findFirst({
-    where: { id: accountId, workspaceId },
+    where: { id: accountId, workspaceId, connectionStatus: "CONNECTED" },
   });
+}
+
+const OAUTH_INTENT_TTL_MS = 10 * 60 * 1000;
+
+const accountProjection = {
+  id: true,
+  instagramId: true,
+  username: true,
+  name: true,
+  tokenExpiresAt: true,
+  webhookSubscribed: true,
+  connectionStatus: true,
+  connectionGeneration: true,
+  capabilities: true,
+  timezone: true,
+  connectedAt: true,
+  disconnectedAt: true,
+} as const;
+
+function serializeAccount(account: {
+  id: string;
+  instagramId: string;
+  username: string;
+  name: string | null;
+  tokenExpiresAt: Date | null;
+  webhookSubscribed: boolean;
+  connectionStatus: string;
+  connectionGeneration: number;
+  capabilities: string[];
+  timezone: string;
+  connectedAt: Date;
+  disconnectedAt: Date | null;
+}) {
+  return {
+    ...account,
+    openreplyAccountId: account.id,
+    instagramUserId: account.instagramId,
+    status: account.connectionStatus,
+    tokenExpiresAt: account.tokenExpiresAt?.toISOString() ?? null,
+    connectedAt: account.connectedAt.toISOString(),
+    disconnectedAt: account.disconnectedAt?.toISOString() ?? null,
+  };
 }
 
 async function campaignAnalytics(workspaceId: string) {
@@ -345,9 +392,90 @@ async function listPosts(workspaceId: string, instagramAccountId: string, limit:
       caption: post.caption ?? null,
       mediaType: post.media_product_type ?? post.media_type,
       mediaUrl: post.thumbnail_url ?? post.media_url ?? null,
+      thumbnailUrl: post.thumbnail_url ?? null,
       permalink: post.permalink ?? null,
       timestamp: post.timestamp,
     })),
+  };
+}
+
+const POST_INSIGHT_METRICS = [
+  "views",
+  "reach",
+  "saved",
+  "shares",
+  "total_interactions",
+] as const;
+
+type PostInsightMetric = (typeof POST_INSIGHT_METRICS)[number];
+
+function emptyPostInsights() {
+  return {
+    views: null as number | null,
+    reach: null as number | null,
+    saved: null as number | null,
+    shares: null as number | null,
+    totalInteractions: null as number | null,
+  };
+}
+
+function assignPostInsight(
+  target: ReturnType<typeof emptyPostInsights>,
+  metric: PostInsightMetric,
+  value: number | undefined,
+) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return false;
+  if (metric === "total_interactions") target.totalInteractions = value;
+  else target[metric] = value;
+  return true;
+}
+
+async function getPostInsights(
+  workspaceId: string,
+  instagramAccountId: string,
+  postId: string,
+): Promise<MetisControlResult> {
+  const account = await getWorkspaceInstagramAccount(workspaceId, instagramAccountId);
+  if (!account) return { status: 404, error: "Instagram account not found" };
+
+  const accessToken = decryptToken(account.accessToken);
+  const ownedPosts = await getAllUserMedia(accessToken, 100);
+  if (!ownedPosts.some((post) => post.id === postId)) {
+    return { status: 404, error: "Instagram post not found" };
+  }
+
+  const metrics = emptyPostInsights();
+  let successfulMetrics = 0;
+  let permissionDenied = false;
+
+  await Promise.all(POST_INSIGHT_METRICS.map(async (metric) => {
+    try {
+      const result = await getMediaInsights(accessToken, postId, [metric]);
+      if (assignPostInsight(metrics, metric, result[metric])) successfulMetrics += 1;
+    } catch (error) {
+      if (error instanceof PermissionError) {
+        if (error.code === 10 || error.code === 200) permissionDenied = true;
+        return;
+      }
+      throw error;
+    }
+  }));
+
+  const isComplete = successfulMetrics === POST_INSIGHT_METRICS.length;
+
+  return {
+    data: {
+      instagramAccountId,
+      postId,
+      fetchedAt: new Date().toISOString(),
+      insightsAvailable: successfulMetrics > 0,
+      metrics,
+      unavailableReason: isComplete
+        ? null
+        : permissionDenied
+          ? "permission_denied"
+          : "metric_not_available",
+    },
   };
 }
 
@@ -415,27 +543,117 @@ export async function executeMetisControl(workspaceId: string, command: MetisCon
     }
     case "templates:list": return { data: CAMPAIGN_TEMPLATES };
     case "accounts:list": {
-      const accounts = await prisma.instagramAccount.findMany({ where: { workspaceId }, orderBy: { connectedAt: "desc" }, select: { id: true, username: true, name: true, instagramId: true, tokenExpiresAt: true, webhookSubscribed: true, connectedAt: true } });
-      return { data: accounts.map((account) => ({ ...account, tokenExpiresAt: account.tokenExpiresAt?.toISOString() ?? null, connectedAt: account.connectedAt.toISOString() })) };
+      const accounts = await prisma.instagramAccount.findMany({
+        where: { workspaceId },
+        orderBy: { connectedAt: "desc" },
+        select: accountProjection,
+      });
+      return { data: accounts.map(serializeAccount) };
     }
     case "accounts:disconnect": {
-      const deleted = await prisma.instagramAccount.deleteMany({ where: { id: command.instagramAccountId, workspaceId } });
-      return deleted.count === 1 ? { data: { id: command.instagramAccountId } } : { status: 404, error: "Instagram account not found" };
+      const updated = await softDisconnectInstagramAccount(
+        workspaceId,
+        command.instagramAccountId,
+      );
+      return updated.count === 1
+        ? { data: { id: command.instagramAccountId, status: "DISCONNECTED" } }
+        : { status: 404, error: "Instagram account not found" };
     }
     case "accounts:connect-url": {
+      return { status: 410, error: "Use an exact connect intent" };
+    }
+    case "accounts:connect-intent": {
       const missing = getMissingInstagramOAuthEnv();
-      if (missing.length > 0) return { status: 503, error: "Instagram connection is not configured" };
+      if (missing.length > 0) {
+        return { status: 503, error: "Instagram connection is not configured" };
+      }
+      const existing = await prisma.metisOAuthIntent.findUnique({
+        where: { id: command.intentId },
+      });
+      if (
+        existing &&
+        (existing.workspaceId !== workspaceId ||
+          existing.actorId !== command.actorId ||
+          existing.metisOrganizationId !== command.metisOrganizationId)
+      ) {
+        return { status: 409, error: "Connect intent identity conflict" };
+      }
+      if (existing && existing.status !== "PENDING") {
+        return { status: 409, error: "Connect intent is no longer pending" };
+      }
+      const expiresAt = existing?.expiresAt ?? new Date(Date.now() + OAUTH_INTENT_TTL_MS);
+      if (expiresAt.getTime() <= Date.now()) {
+        return { status: 410, error: "Connect intent expired" };
+      }
+      if (!existing) {
+        await prisma.metisOAuthIntent.create({
+          data: {
+            id: command.intentId,
+            workspaceId,
+            actorId: command.actorId,
+            metisOrganizationId: command.metisOrganizationId,
+            expiresAt,
+          },
+        });
+      }
       const redirectUri = `${getBaseUrl()}/api/instagram/callback`;
       return {
         data: {
-          url: getAuthorizationUrl(
+          authorizationUrl: getAuthorizationUrl(
             redirectUri,
-            createMetisOAuthState(workspaceId),
+            createMetisOAuthState(workspaceId, {
+              intentId: command.intentId,
+              actorId: command.actorId,
+              metisOrganizationId: command.metisOrganizationId,
+            }),
           ),
+          expiresAt: expiresAt.toISOString(),
         },
       };
     }
+    case "accounts:connect-intent-result": {
+      const intent = await prisma.metisOAuthIntent.findUnique({
+        where: { id: command.intentId },
+        include: { instagramAccount: { select: accountProjection } },
+      });
+      if (
+        !intent ||
+        intent.workspaceId !== workspaceId ||
+        intent.actorId !== command.actorId ||
+        intent.metisOrganizationId !== command.metisOrganizationId
+      ) {
+        return { status: 404, error: "Connect intent not found" };
+      }
+      if (intent.status === "PENDING" && intent.expiresAt.getTime() <= Date.now()) {
+        await prisma.metisOAuthIntent.updateMany({
+          where: { id: intent.id, status: "PENDING" },
+          data: { status: "FAILED", errorCode: "expired", completedAt: new Date() },
+        });
+        return { status: 410, error: "Connect intent expired" };
+      }
+      if (intent.status === "PENDING") {
+        return { status: 409, error: "Connect intent pending" };
+      }
+      if (intent.status === "FAILED" || !intent.instagramAccount) {
+        return { status: 410, error: intent.errorCode ?? "Connect intent failed" };
+      }
+      await prisma.metisOAuthIntent.updateMany({
+        where: { id: intent.id, consumedAt: null },
+        data: { consumedAt: new Date() },
+      });
+      return { data: { account: serializeAccount(intent.instagramAccount) } };
+    }
+    case "accounts:get": {
+      const account = await prisma.instagramAccount.findFirst({
+        where: { id: command.instagramAccountId, workspaceId },
+        select: accountProjection,
+      });
+      return account
+        ? { data: { account: serializeAccount(account) } }
+        : { status: 404, error: "Instagram account not found" };
+    }
     case "posts:list": return listPosts(workspaceId, command.instagramAccountId, command.limit);
+    case "posts:insights": return getPostInsights(workspaceId, command.instagramAccountId, command.postId);
     case "logs:list": return { data: await listLogs(workspaceId, command) };
     case "inbox:list": return listInbox(workspaceId, command.instagramAccountId);
     case "inbox:thread": return inboxThread(workspaceId, command.instagramAccountId, command.conversationId);

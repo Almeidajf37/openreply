@@ -54,42 +54,67 @@ export const campaignPatchSchema = campaignPayloadObject.partial().extend({
 
 const accountId = z.string().min(1).max(128);
 const campaignId = z.string().min(1).max(128);
+const uuid = z.string().uuid();
+const organizationScope = { metisOrganizationId: uuid };
 
 export const metisControlRequestSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("dashboard"), instagramAccountId: accountId.optional() }),
-  z.object({ action: z.literal("campaigns:list"), instagramAccountId: accountId.optional() }),
-  z.object({ action: z.literal("campaigns:create"), campaign: campaignPayloadSchema }),
-  z.object({ action: z.literal("campaigns:update"), campaign: campaignPatchSchema }),
-  z.object({ action: z.literal("campaigns:delete"), campaignId }),
-  z.object({ action: z.literal("templates:list") }),
-  z.object({ action: z.literal("accounts:list") }),
-  z.object({ action: z.literal("accounts:connect-url") }),
-  z.object({ action: z.literal("accounts:disconnect"), instagramAccountId: accountId }),
+  z.object({ action: z.literal("dashboard"), ...organizationScope, instagramAccountId: accountId.optional() }),
+  z.object({ action: z.literal("campaigns:list"), ...organizationScope, instagramAccountId: accountId.optional() }),
+  z.object({ action: z.literal("campaigns:create"), ...organizationScope, campaign: campaignPayloadSchema }),
+  z.object({ action: z.literal("campaigns:update"), ...organizationScope, campaign: campaignPatchSchema }),
+  z.object({ action: z.literal("campaigns:delete"), ...organizationScope, campaignId }),
+  z.object({ action: z.literal("templates:list"), ...organizationScope }),
+  z.object({ action: z.literal("accounts:list"), ...organizationScope }),
+  z.object({ action: z.literal("accounts:connect-url"), ...organizationScope }),
+  z.object({
+    action: z.literal("accounts:connect-intent"),
+    ...organizationScope,
+    intentId: uuid,
+    actorId: uuid,
+  }),
+  z.object({
+    action: z.literal("accounts:connect-intent-result"),
+    ...organizationScope,
+    intentId: uuid,
+    actorId: uuid,
+  }),
+  z.object({ action: z.literal("accounts:get"), ...organizationScope, instagramAccountId: accountId }),
+  z.object({ action: z.literal("accounts:disconnect"), ...organizationScope, instagramAccountId: accountId }),
   z.object({
     action: z.literal("posts:list"),
+    ...organizationScope,
     instagramAccountId: accountId,
     limit: z.number().int().min(1).max(100).default(50),
   }),
   z.object({
+    action: z.literal("posts:insights"),
+    ...organizationScope,
+    instagramAccountId: accountId,
+    postId: z.string().min(1).max(128),
+  }),
+  z.object({
     action: z.literal("logs:list"),
+    ...organizationScope,
     instagramAccountId: accountId.optional(),
     status: z.string().max(40).optional(),
     page: z.number().int().min(1).default(1),
     limit: z.number().int().min(1).max(50).default(20),
   }),
-  z.object({ action: z.literal("inbox:list"), instagramAccountId: accountId }),
+  z.object({ action: z.literal("inbox:list"), ...organizationScope, instagramAccountId: accountId }),
   z.object({
     action: z.literal("inbox:thread"),
+    ...organizationScope,
     instagramAccountId: accountId,
     conversationId: z.string().min(1).max(256),
   }),
   z.object({
     action: z.literal("inbox:send"),
+    ...organizationScope,
     instagramAccountId: accountId,
     recipientId: z.string().min(1).max(256),
     text: z.string().trim().min(1).max(1000),
   }),
-  z.object({ action: z.literal("diagnostics") }),
+  z.object({ action: z.literal("diagnostics"), ...organizationScope }),
 ]);
 
 export type MetisControlRequest = z.infer<typeof metisControlRequestSchema>;

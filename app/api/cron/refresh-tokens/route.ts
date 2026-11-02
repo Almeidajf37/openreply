@@ -31,7 +31,8 @@ export async function GET(request: NextRequest) {
 
   const accountsToRefresh = await prisma.instagramAccount.findMany({
     where: {
-      accessToken: { not: "" },
+      connectionStatus: "CONNECTED",
+      accessToken: { not: null },
       tokenExpiresAt: {
         not: null,
         lte: cutoffDate,
@@ -42,17 +43,19 @@ export async function GET(request: NextRequest) {
       workspaceId: true,
       username: true,
       accessToken: true,
+      connectionGeneration: true,
     },
   });
 
   const results: Array<{
     instagramAccountId: string;
     username: string;
-    status: "refreshed" | "failed";
+    status: "refreshed" | "skipped" | "failed";
     error?: string;
   }> = [];
 
   for (const account of accountsToRefresh) {
+    if (!account.accessToken) continue;
     try {
       const currentToken = decryptToken(account.accessToken);
       const { accessToken: newToken, expiresIn } =
@@ -60,19 +63,31 @@ export async function GET(request: NextRequest) {
       const encryptedToken = encryptToken(newToken);
       const newExpiry = new Date(Date.now() + expiresIn * 1000);
 
-      await prisma.instagramAccount.update({
-        where: { id: account.id },
+      const updated = await prisma.instagramAccount.updateMany({
+        where: {
+          id: account.id,
+          connectionStatus: "CONNECTED",
+          accessToken: account.accessToken,
+          connectionGeneration: account.connectionGeneration,
+        },
         data: {
           accessToken: encryptedToken,
           tokenExpiresAt: newExpiry,
         },
       });
 
-      results.push({
-        instagramAccountId: account.id,
-        username: account.username,
-        status: "refreshed",
-      });
+      results.push(updated.count === 1
+        ? {
+            instagramAccountId: account.id,
+            username: account.username,
+            status: "refreshed",
+          }
+        : {
+            instagramAccountId: account.id,
+            username: account.username,
+            status: "skipped",
+            error: "account_changed_during_refresh",
+          });
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Unknown error";
       await prisma.operationalEvent.create({
@@ -101,6 +116,7 @@ export async function GET(request: NextRequest) {
     success: true,
     data: {
       totalProcessed: accountsToRefresh.length,
+      refreshed: results.filter((result) => result.status === "refreshed").length,
       workspacesReset: usageReset.count,
       results,
     },

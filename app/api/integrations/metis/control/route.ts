@@ -9,6 +9,7 @@ export const maxDuration = 60;
 const handler = createMetisControlHandler({
   token: process.env.METIS_INTEGRATION_TOKEN,
   workspaceId: process.env.METIS_OPENREPLY_WORKSPACE_ID,
+  organizationId: process.env.METIS_INSTAGRAM_ORGANIZATION_ID,
   execute: executeMetisControl,
 });
 

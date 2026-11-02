@@ -13,6 +13,7 @@ export type MetisControlResult = {
 export type MetisControlDependencies = {
   token?: string;
   workspaceId?: string;
+  organizationId?: string;
   execute(workspaceId: string, command: MetisControlRequest): Promise<MetisControlResult>;
 };
 
@@ -32,7 +33,7 @@ function json(body: unknown, status = 200) {
 
 export function createMetisControlHandler(dependencies: MetisControlDependencies) {
   return async (request: Request): Promise<Response> => {
-    if (!dependencies.token || !dependencies.workspaceId) {
+    if (!dependencies.token || !dependencies.workspaceId || !dependencies.organizationId) {
       return json({ success: false, error: "Integration not configured" }, 503);
     }
     if (!isAuthorized(request, dependencies.token)) {
@@ -50,6 +51,9 @@ export function createMetisControlHandler(dependencies: MetisControlDependencies
         { success: false, error: "Invalid input", details: parsed.error.flatten() },
         400,
       );
+    }
+    if (parsed.data.metisOrganizationId !== dependencies.organizationId) {
+      return json({ success: false, error: "Forbidden" }, 403);
     }
 
     try {

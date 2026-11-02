@@ -26,7 +26,10 @@ export async function GET(request: NextRequest) {
   }
 
   const accounts = await prisma.instagramAccount.findMany({
-    where: { accessToken: { not: "" } },
+    where: {
+      connectionStatus: "CONNECTED",
+      accessToken: { not: null },
+    },
     select: {
       id: true,
       workspaceId: true,
@@ -41,6 +44,7 @@ export async function GET(request: NextRequest) {
   const failures: Array<{ username: string; reason: string }> = [];
 
   for (const account of accounts) {
+    if (!account.accessToken) continue;
     try {
       const token = decryptToken(account.accessToken);
       const info = await getUserInfo(token);

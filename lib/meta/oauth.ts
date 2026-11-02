@@ -6,6 +6,7 @@ import {
   timingSafeEqual,
 } from "crypto";
 import { getEncryptionKeyHex, requireEnv } from "@/lib/env";
+import { z } from "zod";
 
 // Instagram API with Instagram Login authorizes on www.instagram.com. The old
 // api.instagram.com/oauth/authorize host belonged to the retired Basic Display
@@ -19,10 +20,62 @@ const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
 const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 
-interface OAuthStatePayload {
+const instagramTokenGrantSchema = z.object({
+  access_token: z.string().min(1).refine((value) => value.trim().length > 0),
+  user_id: z.union([
+    z.string().min(1).refine((value) => value.trim().length > 0),
+    z.number().refine((value) => Number.isInteger(value) && value > 0),
+  ]),
+  permissions: z.unknown().optional(),
+});
+
+function parseGrantedPermissions(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+
+  return Array.from(
+    new Set(
+      value
+        .split(",")
+        .map((permission) => permission.trim())
+        .filter((permission) => permission.length > 0),
+    ),
+  );
+}
+
+// Business Login documents a single grant inside data; retain flat responses
+// for compatibility with accounts that still receive the earlier format.
+const instagramTokenExchangeResponseSchema = z.union([
+  instagramTokenGrantSchema,
+  z.object({ data: z.tuple([instagramTokenGrantSchema]) }).transform(({ data }) => data[0]),
+]);
+
+export interface OAuthStatePayload {
   workspaceId: string;
   ts: number;
   source?: "metis";
+  intentId?: string;
+  actorId?: string;
+  metisOrganizationId?: string;
+}
+
+export interface MetisOAuthStateContext {
+  intentId: string;
+  actorId: string;
+  metisOrganizationId: string;
+}
+
+export function isMetisOAuthStateForAuthority(
+  state: OAuthStatePayload | null,
+  workspaceId?: string,
+  organizationId?: string,
+) {
+  return Boolean(
+    state?.source === "metis" &&
+    workspaceId &&
+    organizationId &&
+    state.workspaceId === workspaceId &&
+    state.metisOrganizationId === organizationId,
+  );
 }
 
 function base64UrlEncode(value: string): string {
@@ -46,12 +99,16 @@ export function createOAuthState(workspaceId: string): string {
   return `${payload}.${signState(payload)}`;
 }
 
-export function createMetisOAuthState(workspaceId: string): string {
+export function createMetisOAuthState(
+  workspaceId: string,
+  context: MetisOAuthStateContext,
+): string {
   const payload = base64UrlEncode(
     JSON.stringify({
       workspaceId,
       ts: Date.now(),
       source: "metis",
+      ...context,
     } satisfies OAuthStatePayload)
   );
   return `${payload}.${signState(payload)}`;
@@ -76,7 +133,19 @@ export function verifyOAuthState(state: string | null): OAuthStatePayload | null
 
   try {
     const parsed = JSON.parse(base64UrlDecode(payload)) as OAuthStatePayload;
-    if (!parsed.workspaceId || Date.now() - parsed.ts > STATE_MAX_AGE_MS) {
+    if (
+      !parsed.workspaceId ||
+      !Number.isFinite(parsed.ts) ||
+      parsed.ts > Date.now() + 60_000 ||
+      Date.now() - parsed.ts > STATE_MAX_AGE_MS
+    ) {
+      return null;
+    }
+
+    if (
+      parsed.source === "metis" &&
+      (!parsed.intentId || !parsed.actorId || !parsed.metisOrganizationId)
+    ) {
       return null;
     }
 
@@ -91,7 +160,7 @@ export function getAuthorizationUrl(redirectUri: string, state: string): string 
     client_id: requireEnv("INSTAGRAM_APP_ID"),
     redirect_uri: redirectUri,
     scope:
-      "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_manage_insights",
+      "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_manage_insights,instagram_business_content_publish",
     response_type: "code",
     state,
   });
@@ -102,7 +171,7 @@ export function getAuthorizationUrl(redirectUri: string, state: string): string 
 export async function exchangeCodeForToken(
   code: string,
   redirectUri: string
-): Promise<{ accessToken: string; userId: string }> {
+): Promise<{ accessToken: string; userId: string; permissions: string[] }> {
   const body = new URLSearchParams({
     client_id: requireEnv("INSTAGRAM_APP_ID"),
     client_secret: requireEnv("INSTAGRAM_APP_SECRET"),
@@ -124,10 +193,15 @@ export async function exchangeCodeForToken(
     );
   }
 
-  const data = await response.json();
+  const result = instagramTokenExchangeResponseSchema.safeParse(await response.json());
+  if (!result.success) {
+    // Never include the response body or validation details: they may contain tokens.
+    throw new Error("Instagram token response is invalid");
+  }
   return {
-    accessToken: data.access_token,
-    userId: String(data.user_id),
+    accessToken: result.data.access_token,
+    userId: String(result.data.user_id),
+    permissions: parseGrantedPermissions(result.data.permissions),
   };
 }
 

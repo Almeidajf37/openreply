@@ -1,5 +1,25 @@
 import { prisma } from "@/lib/db/client";
 
+export async function softDisconnectInstagramAccount(
+  workspaceId: string,
+  instagramAccountId: string,
+) {
+  return prisma.instagramAccount.updateMany({
+    where: {
+      workspaceId,
+      id: instagramAccountId,
+    },
+    data: {
+      accessToken: null,
+      tokenExpiresAt: null,
+      webhookSubscribed: false,
+      capabilities: [],
+      connectionStatus: "DISCONNECTED",
+      disconnectedAt: new Date(),
+    },
+  });
+}
+
 export async function canConnectInstagramAccount({
   workspaceId,
   instagramId,
@@ -29,15 +49,22 @@ export async function getWorkspaceInstagramAccount(
   workspaceId: string,
   instagramAccountId?: string | null
 ) {
+  const connectedWhere = {
+    workspaceId,
+    connectionStatus: "CONNECTED" as const,
+    accessToken: { not: null },
+  };
   if (instagramAccountId && instagramAccountId !== "all") {
-    return prisma.instagramAccount.findFirst({
-      where: { id: instagramAccountId, workspaceId },
+    const account = await prisma.instagramAccount.findFirst({
+      where: { id: instagramAccountId, ...connectedWhere },
     });
+    return account?.accessToken ? { ...account, accessToken: account.accessToken } : null;
   }
 
-  return prisma.instagramAccount.findFirst({
-    where: { workspaceId },
+  const account = await prisma.instagramAccount.findFirst({
+    where: connectedWhere,
     orderBy: { connectedAt: "desc" },
   });
+  return account?.accessToken ? { ...account, accessToken: account.accessToken } : null;
 }
 

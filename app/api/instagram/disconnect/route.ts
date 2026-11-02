@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/db/client";
+import { softDisconnectInstagramAccount } from "@/lib/instagram-accounts";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -23,14 +23,27 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json().catch(() => ({}));
   const instagramAccountId =
-    typeof body.instagramAccountId === "string" ? body.instagramAccountId : null;
+    typeof body.instagramAccountId === "string"
+      ? body.instagramAccountId.trim()
+      : "";
 
-  await prisma.instagramAccount.deleteMany({
-    where: {
-      workspaceId: context.workspaceId,
-      ...(instagramAccountId ? { id: instagramAccountId } : {}),
-    },
-  });
+  if (!instagramAccountId || instagramAccountId.length > 128) {
+    return NextResponse.json(
+      { success: false, error: "Instagram account id is required" },
+      { status: 400 }
+    );
+  }
+
+  const disconnected = await softDisconnectInstagramAccount(
+    context.workspaceId,
+    instagramAccountId,
+  );
+  if (disconnected.count !== 1) {
+    return NextResponse.json(
+      { success: false, error: "Instagram account not found" },
+      { status: 404 }
+    );
+  }
 
   return NextResponse.json({ success: true });
 }

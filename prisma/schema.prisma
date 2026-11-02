@@ -84,6 +84,8 @@ model Workspace {
   linkClicks        LinkClick[]
   webhookEvents     WebhookEvent[]
   operationalEvents OperationalEvent[]
+  metisOAuthIntents MetisOAuthIntent[]
+  publicationOperations MetaPublicationOperation[]
 
   @@index([ownerId])
 }
@@ -130,9 +132,14 @@ model InstagramAccount {
   instagramId       String   @unique
   username          String
   name              String?
-  accessToken       String
+  accessToken       String?
   tokenExpiresAt    DateTime?
   webhookSubscribed Boolean  @default(false)
+  connectionStatus  InstagramConnectionStatus @default(CONNECTED)
+  connectionGeneration Int @default(1)
+  capabilities      String[] @default([])
+  timezone          String @default("America/Sao_Paulo")
+  disconnectedAt    DateTime?
   connectedAt       DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -141,8 +148,58 @@ model InstagramAccount {
   dmLogs      DmLog[]
   linkClicks  LinkClick[]
   followerSnapshots FollowerSnapshot[]
+  metisOAuthIntents MetisOAuthIntent[]
+  publicationOperations MetaPublicationOperation[]
 
   @@index([workspaceId])
+  @@index([workspaceId, connectionStatus])
+}
+
+model MetisOAuthIntent {
+  id                  String                 @id
+  workspaceId         String
+  metisOrganizationId String
+  actorId             String
+  status              MetisOAuthIntentStatus @default(PENDING)
+  instagramAccountId  String?
+  errorCode           String?
+  expiresAt           DateTime
+  completedAt         DateTime?
+  consumedAt          DateTime?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  workspace        Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  instagramAccount InstagramAccount? @relation(fields: [instagramAccountId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status, expiresAt])
+  @@index([metisOrganizationId, actorId])
+}
+
+model MetaPublicationOperation {
+  id                 String                         @id @default(cuid())
+  workspaceId        String
+  metisOrganizationId String
+  instagramAccountId String
+  metisJobId         String
+  attemptReceipt     String
+  operationKey       String
+  operationIdentity  String
+  operation          MetaPublicationOperationType
+  payloadHash        String
+  status             MetaPublicationOperationStatus @default(STARTED)
+  response            Json?
+  errorCode           String?
+  startedAt           DateTime                       @default(now())
+  completedAt         DateTime?
+  updatedAt           DateTime                       @updatedAt
+
+  workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, metisJobId, operationIdentity])
+  @@index([instagramAccountId, status])
+  @@index([metisOrganizationId, metisJobId])
 }
 
 /// Daily follower total for one account. Instagram only retains ~30 days of
@@ -356,6 +413,32 @@ enum WorkspaceInvitationStatus {
   ACCEPTED
   REVOKED
   EXPIRED
+}
+
+enum InstagramConnectionStatus {
+  CONNECTED
+  DISCONNECTED
+}
+
+enum MetisOAuthIntentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum MetaPublicationOperationType {
+  DIAGNOSTIC
+  CREATE_CONTAINER
+  CONTAINER_STATUS
+  PUBLISH
+  MEDIA
+}
+
+enum MetaPublicationOperationStatus {
+  STARTED
+  SUCCEEDED
+  AMBIGUOUS
+  FAILED_SAFE
 }
 
 enum DmStatus {
